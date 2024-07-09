@@ -1,1 +1,59 @@
 # water-level
+#define BLINKER_WIFI
+#include <Blinker.h>
+
+char auth[] = "171bfe7e8eb1"; // Device authentication key
+char ssid[] = "zxl"; // WiFi name
+char pswd[] = "987654321"; // WiFi password
+
+BlinkerNumber WATER("water"); // Create a new component object
+
+float water_read = 0; // Define a float type variable to store the water level reading
+
+const int buzzerPin = 5; 
+
+void heartbeat() {
+    WATER.print(water_read); // Print the value of water_read to the WATER component
+}
+
+void setup() {
+    Serial.begin(115200); // Set the serial baud rate to 115200
+    delay(100);
+
+    // The following is used to print WiFi connection information
+    Serial.println("Connecting to WiFi");
+    Serial.print("SSID: ");
+    Serial.println(ssid);
+
+    pinMode(LED_BUILTIN, OUTPUT); // Set the built-in LED pin to output mode
+    pinMode(buzzerPin, OUTPUT); // Set the buzzer pin to output mode
+
+    BLINKER_DEBUG.stream(Serial);
+    BLINKER_DEBUG.debugAll();
+
+    Blinker.begin(auth, ssid, pswd); // Initialize Blinker
+    Blinker.attachHeartbeat(heartbeat); // Attach the heartbeat function
+}
+
+void loop() {
+    Blinker.run(); // Run Blinker
+    water_read = (analogRead(A0) * 100) / 1024.0; // ESP8266 internal ADC reads the water level
+
+    if (isnan(water_read)) {
+        BLINKER_LOG("Failed to read from sensor!");
+    } else {
+        BLINKER_LOG("Water-Level: ", water_read, "%");
+    }
+
+    // Check if the water level is greater than 30%
+    if (water_read > 30.0) {
+        digitalWrite(LED_BUILTIN, HIGH); // Turn the LED on
+        digitalWrite(buzzerPin, HIGH); // Turn the buzzer on
+        delay(500); // Wait for a second
+        digitalWrite(LED_BUILTIN, LOW); // Turn the LED off
+        digitalWrite(buzzerPin, LOW); // Turn the buzzer off
+        delay(500); // Wait for a second
+    }
+
+    Blinker.delay(1000);
+}
