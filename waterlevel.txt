@@ -1,0 +1,207 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <EEPROM.h>
+
+// Define constants for EEPROM storage
+#define EEPROM_SIZE 96
+#define SSID_ADDR 0
+#define PASSWORD_ADDR 32
+#define DEVICE_ID_ADDR 64
+#define OUTPUT_STATUS_ADDR 94
+
+int value = 0; // Variable to store read value
+float WaterLevel; // Variable to store water level value
+char ssid[32]; // WiFi SSID
+char password[32]; // WiFi Password
+char deviceId[30];  // Device ID storage
+bool outputStatus = false; // Output status (ON/OFF)
+
+ESP8266WebServer server(80); // Create a web server on port 80
+
+void setup() {
+  Serial.begin(115200); // Initialize serial communication at 115200 baud rate
+  EEPROM.begin(EEPROM_SIZE); // Initialize EEPROM with defined size
+
+  // Read WiFi credentials, device ID, and last output status from EEPROM
+  readEEPROM();
+
+  // Check if SSID is empty or WiFi connection failed
+  if (strlen(ssid) == 0 || WiFi.begin(ssid, password) != WL_CONNECTED) {
+    // Disconnect from any previous WiFi connection
+    WiFi.disconnect();
+    delay(100);
+
+    Serial.println("Starting AP mode...");
+    WiFi.mode(WIFI_AP); // Set WiFi mode to Access Point (AP)
+    bool apStarted = WiFi.softAP("ESP8266_AP"); // Start Access Point with SSID "ESP8266_AP"
+    if (apStarted) {
+      Serial.println("AP mode started successfully");
+      Serial.print("AP IP address: ");
+      Serial.println(WiFi.softAPIP()); // Print AP mode IP address
+    } else {
+      Serial.println("Failed to start AP mode");
+    }
+
+    // Create a web server accessible in AP mode to input WiFi credentials, device ID, and initial status
+    server.on("/", handle_ConfigPage); // Route to handle the configuration page
+    server.on("/save", handle_SaveConfig); // Route to save the configuration
+    server.on("/waterlevel", handle_WaterLevelPage); // Route to display water level
+    server.onNotFound(handle_NotFound); // Handle any undefined routes
+  } else {
+    WiFi.mode(WIFI_STA); // Set WiFi mode to Station (STA)
+    Serial.println("Connecting to WiFi...");
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(1000); // Wait for WiFi connection
+      Serial.print(".");
+    }
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.print("Got IP: ");
+    Serial.println(WiFi.localIP()); // Print the obtained IP address
+
+    // Load the last output status and apply it to the output device
+    applyLastOutputStatus();
+
+    // Set up routes for water level monitoring
+    server.on("/", handle_WaterLevelPage); // Route to display water level
+    server.onNotFound(handle_NotFound); // Handle any undefined routes
+  }
+
+  server.begin(); // Start the web server
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient(); // Handle incoming client requests
+}
+
+// HTML web page to configure WiFi credentials, device ID, and initial output status
+void handle_ConfigPage() {
+  server.send(200, "text/html", sendConfigHTML()); // Send the configuration HTML page to the client
+}
+
+// HTML web page to display water level
+void handle_WaterLevelPage() {
+  WaterLevel = (analogRead(A0) * 100) / 1024.0; // Read the analog value from A0 and convert it to a water level percentage
+  server.send(200, "text/html", sendWaterLevelHTML(WaterLevel)); // Send the water level HTML page to the client
+}
+
+// Save the provided configuration to EEPROM when the user submits the form
+void handle_SaveConfig() {
+  String newSSID = server.arg("ssid"); // Get the SSID from the form
+  String newPassword = server.arg("password"); // Get the password from the form
+  String newDeviceId = server.arg("deviceId"); // Get the device ID from the form
+  String newStatus = server.arg("status"); // Get the output status from the form
+
+  if (newSSID.length() < 32 && newPassword.length() < 32 && newDeviceId.length() < 30) {
+    newSSID.toCharArray(ssid, 32); // Convert the new SSID to a character array
+    newPassword.toCharArray(password, 32); // Convert the new password to a character array
+    newDeviceId.toCharArray(deviceId, 30); // Convert the new device ID to a character array
+    outputStatus = (newStatus == "ON"); // Set the output status based on the form input
+
+    // Write WiFi credentials, device ID, and last output status to EEPROM
+    writeEEPROM();
+
+    server.sendHeader("Location", "/waterlevel"); // Redirect to the water level page
+    server.send(303);  // Send a 303 (See Other) HTTP response
+  } else {
+    server.send(400, "text/html", "<html><body><h1>Invalid input</h1></body></html>"); // Send a 400 (Bad Request) response if inputs are invalid
+  }
+}
+
+void handle_NotFound() {
+  server.send(404, "text/plain", "Not found"); // Handle any undefined routes with a 404 (Not Found) response
+}
+
+// HTML page to collect WiFi credentials, device ID, and initial output status
+String sendConfigHTML() {
+  String ptr = "<!DOCTYPE html><html>\n";
+  ptr += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
+  ptr += "<title>ESP8266 Configuration</title>\n";
+  ptr += "<style>\n";
+  ptr += "body { font-family: Arial, sans-serif; margin: 0; padding: 0; text-align: center; background-color: #f0f0f0; }\n";
+  ptr += "h1 { color: #333; }\n";
+  ptr += "form { background-color: #fff; padding: 20px; margin: 20px auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); }\n";
+  ptr += "input[type='text'], input[type='password'] { margin-bottom: 10px; padding: 10px; width: 90%; }\n";
+  ptr += ".status { display: flex; justify-content: center; align-items: center; margin-bottom: 10px; }\n";
+  ptr += ".status label { margin-right: 10px; }\n";
+  ptr += "input[type='radio'] { margin-right: 5px; }\n";
+  ptr += "input[type='submit'] { padding: 10px 20px; background-color: #28a745; border: none; color: #fff; cursor: pointer; }\n";
+  ptr += "</style>\n";
+  ptr += "</head>\n";
+  ptr += "<body><h1>Configuration</h1>\n";
+  ptr += "<form action=\"/save\" method=\"POST\">\n";
+  ptr += "SSID: <input type=\"text\" name=\"ssid\" required><br>\n";
+  ptr += "Password: <input type=\"password\" name=\"password\" required><br>\n";
+  ptr += "Device ID: <input type=\"text\" name=\"deviceId\" required><br>\n";
+  ptr += "<div class=\"status\">\n";
+  ptr += "<label>Output Status: </label>\n";
+  ptr += "<input type=\"radio\" name=\"status\" value=\"ON\"> ON\n";
+  ptr += "<input type=\"radio\" name=\"status\" value=\"OFF\"> OFF\n";
+  ptr += "</div>\n";
+  ptr += "<input type=\"submit\" value=\"Save\">\n";
+  ptr += "</form>\n";
+  ptr += "</body>\n";
+  ptr += "</html>\n";
+  return ptr; // Return the HTML string for the configuration page
+}
+
+// HTML page to display water level
+String sendWaterLevelHTML(float waterlevel) {
+  String ptr = "<!DOCTYPE html><html>\n";
+  ptr += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
+  ptr += "<title>Water Level Meter</title>\n";
+  ptr += "<style>\n";
+  ptr += "body { font-family: Arial, sans-serif; margin: 0; padding: 0; text-align: center; background-color: #f0f0f0; }\n";
+  ptr += "h1 { color: #333; }\n";
+  ptr += ".data { background-color: #fff; padding: 20px; margin: 20px auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); }\n";
+  ptr += ".waterlevel { font-size: 48px; color: #007bff; }\n";
+  ptr += "</style>\n";
+  ptr += "</head>\n";
+  ptr += "<body><h1>Water Level Meter</h1>\n";
+  ptr += "<div class=\"data\">\n";
+  ptr += "<div class=\"side-by-side\"><div class=\"waterlevel\">" + String(waterlevel) + "</div></div>\n";
+  ptr += "</div>\n";
+  ptr += "</body>\n";
+  ptr += "</html>\n";
+  return ptr; // Return the HTML string for the water level page
+}
+
+// Function to read WiFi credentials, device ID, and last output status from EEPROM
+void readEEPROM() {
+  EEPROM.get(SSID_ADDR, ssid); // Read SSID from EEPROM
+  EEPROM.get(PASSWORD_ADDR, password); // Read Password from EEPROM
+  EEPROM.get(DEVICE_ID_ADDR, deviceId); // Read Device ID from EEPROM
+  EEPROM.get(OUTPUT_STATUS_ADDR, outputStatus); // Read Output Status from EEPROM
+
+  Serial.print("SSID: ");
+  Serial.println(ssid); // Print the SSID
+  Serial.print("Password: ");
+  Serial.println(password); // Print the Password
+  Serial.print("Device ID: ");
+  Serial.println(deviceId); // Print the Device ID
+  Serial.print("Output Status: ");
+  Serial.println(outputStatus ? "ON" : "OFF"); // Print the Output Status
+}
+
+// Function to write WiFi credentials, device ID, and last output status to EEPROM
+void writeEEPROM() {
+  EEPROM.put(SSID_ADDR, ssid); // Write SSID to EEPROM
+  EEPROM.put(PASSWORD_ADDR, password); // Write Password to EEPROM
+  EEPROM.put(DEVICE_ID_ADDR, deviceId); // Write Device ID to EEPROM
+  EEPROM.put(OUTPUT_STATUS_ADDR, outputStatus); // Write Output Status to EEPROM
+  EEPROM.commit(); // Commit the changes to EEPROM
+}
+
+// Load the last output status and apply it to the output device
+void applyLastOutputStatus() {
+  if (outputStatus) {
+    // Turn on the output device (e.g., LED, Relay)
+    // digitalWrite(OUTPUT_PIN, HIGH); // Uncomment and use the appropriate pin
+    Serial.println("Output Status: ON");
+  } else {
+    // Turn off the output device
+    // digitalWrite(OUTPUT_PIN, LOW); // Uncomment and use the appropriate pin
+    Serial.println("Output Status: OFF");
+  }
+}
